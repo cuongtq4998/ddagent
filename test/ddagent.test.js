@@ -231,3 +231,20 @@ test('pool: disk floor with nothing running fails fast instead of waiting foreve
   pool.init();
   await assert.rejects(pool.acquire(ctxOf(), 'k', { jobId: 'j' }), /not enough free disk/);
 });
+
+test('init: copies skills, merges permissions without dropping existing ones, is idempotent', () => {
+  const { initRepo, PERMISSIONS } = require('../lib/init');
+  const repo = tmp();
+  fs.mkdirSync(path.join(repo, '.claude'));
+  fs.writeFileSync(path.join(repo, '.claude', 'settings.json'), JSON.stringify({ permissions: { allow: ['Bash(ls:*)'], deny: ['Read(x)'] }, env: { A: '1' } }));
+  const first = initRepo(repo);
+  assert.ok(first.skills.copied.includes('ddagent-lane'));
+  assert.strictEqual(first.permissionsAdded.length, PERMISSIONS.length);
+  const s = JSON.parse(fs.readFileSync(path.join(repo, '.claude', 'settings.json'), 'utf8'));
+  assert.deepStrictEqual(s.permissions.deny, ['Read(x)']);
+  assert.strictEqual(s.env.A, '1');
+  assert.ok(s.permissions.allow.includes('Bash(ls:*)'));
+  const second = initRepo(repo);
+  assert.strictEqual(second.permissionsAdded.length, 0);
+  assert.strictEqual(second.skills.copied.length, 0);
+});

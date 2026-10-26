@@ -108,6 +108,12 @@ async function main() {
   const o = parse(process.argv.slice(2));
   const cmd = o._[0];
   if (cmd === 'start') { if (o.mock) process.env.DDAGENT_MOCK = '1'; if (o.port) process.env.DDAGENT_PORT = o.port; require(SERVER); return 'daemon'; }
+  if (cmd === 'init') {
+    const r = require('../lib/init').initRepo(path.resolve(o._[1] || '.'), { force: !!o.force });
+    console.log(`skills copied: ${r.skills.copied.join(', ') || '-'}; kept existing: ${r.skills.skipped.join(', ') || '-'} (use --force to overwrite)`);
+    console.log(`permissions added: ${r.permissionsAdded.length}`);
+    return 0;
+  }
   if (cmd === 'run' || cmd === 'prewarm') return runJob(cmd, o);
   if (cmd === 'status') {
     await ensureDaemon(o);
@@ -154,7 +160,7 @@ async function main() {
     console.log(`http://127.0.0.1:${daemonInfo().port}/#token=${token()}`);
     return 0;
   }
-  console.log('usage: ddagent <start [--mock] | run | prewarm | lane | status | doctor | dashboard>\n  run|prewarm --target "iPhone 16" [--target ...] [--project X.xcodeproj] [--scheme S] [--config Debug] [--rebuild] [--mock]');
+  console.log('usage: ddagent <start [--mock] | init [dir] [--force] | run | prewarm | lane | status | doctor | dashboard>\n  run|prewarm --target "iPhone 16" [--target ...] [--project X.xcodeproj] [--scheme S] [--config Debug] [--rebuild] [--mock]');
   return 1;
 }
 
