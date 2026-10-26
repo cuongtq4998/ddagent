@@ -171,6 +171,7 @@ State lives in `~/.ddagent` (override with `DDAGENT_HOME`).
 | `DDAGENT_MAX_SLOTS` | = max lanes | Maximum DerivedData slots |
 | `DDAGENT_MIN_FREE_GB` | 5 | Below this, no new slot is created and the job fails fast (Android jobs fail fast too) |
 | `DDAGENT_ANDROID_BOOT_TIMEOUT_S` | 300 | Seconds to wait for an AVD to finish booting |
+| `DDAGENT_ANDROID_WINDOW` | off | `1` shows the emulator window (needs a desktop session); default is headless |
 | `DDAGENT_GRADLE_USER_HOME` | unset | Gradle user home for Android runs (default: Gradle's own `~/.gradle`) |
 | `DDAGENT_LANE_TTL_MIN` | 30 | Idle lane expiry in minutes |
 | `DDAGENT_NO_OPEN` | unset | Do not auto-open the dashboard |

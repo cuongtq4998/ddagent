@@ -266,3 +266,15 @@ test('cli: Android lane acquire, run, list, doctor and release against a mock da
     try { process.kill(JSON.parse(fs.readFileSync(path.join(home, 'daemon.json'), 'utf8')).pid); } catch { /* already gone */ }
   }
 });
+
+test('emulatorArgs is headless unless DDAGENT_ANDROID_WINDOW asks for a window', () => {
+  const headless = android.emulatorArgs('Pixel', 5554, {});
+  assert.ok(headless.includes('-no-window'));
+  assert.deepStrictEqual(headless.slice(0, 4), ['-avd', 'Pixel', '-port', '5554']);
+  for (const v of ['1', 'true', 'YES']) {
+    const shown = android.emulatorArgs('Pixel', 5554, { DDAGENT_ANDROID_WINDOW: v });
+    assert.ok(!shown.includes('-no-window'), v);
+    assert.ok(shown.includes('-no-snapshot-save'));
+  }
+  assert.ok(android.emulatorArgs('Pixel', 5554, { DDAGENT_ANDROID_WINDOW: '0' }).includes('-no-window'));
+});
