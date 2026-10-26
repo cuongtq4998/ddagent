@@ -8,11 +8,12 @@ description: Use when an agent needs to run an app on an iOS/iPadOS simulator th
 Each agent holds **one lane = one existing simulator** for the whole session. At most 4 lanes exist at once; a fifth agent waits until a lane is released. ddagent never creates simulators, it only reuses them.
 
 ```
-D=ddagent
-LANE=$($D lane acquire --owner <agent-name>)      # waits while all 4 lanes are busy; prints the lane id
-$D run --lane $LANE --project <path>.xcodeproj --scheme <scheme>   # repeat after every code change
-$D lane release $LANE                              # REQUIRED when done, even on failure
+LANE=$(ddagent lane acquire --owner <agent-name>)      # waits while all 4 lanes are busy; prints the lane id
+ddagent run --lane $LANE --project <path>.xcodeproj --scheme <scheme>   # repeat after every code change
+ddagent lane release $LANE                              # REQUIRED when done, even on failure
 ```
+
+If `ddagent` is not on `PATH` (for example you run it from a clone), define a shell function, not a variable: `ddagent() { node /abs/path/to/ddagent/bin/ddagent "$@"; }`. A variable such as `D="node /path/bin/ddagent"; $D ...` is not split into words in zsh and fails with "command not found".
 
 Rules:
 - Always `release` when done. An abandoned lane is released after `DDAGENT_LANE_TTL_MIN` minutes (default 30), and only when no job is running.
