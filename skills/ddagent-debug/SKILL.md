@@ -1,17 +1,17 @@
 ---
 name: ddagent-debug
-description: Dùng khi ddagent gặp lỗi build, cache-hit/incremental sai, slot bị kẹt lease hoặc dirty, simulator không boot/install, hoặc state.json lạ
+description: Use when ddagent hits a build error, reports a wrong cache-hit/incremental mode, has a slot stuck on a lease or dirty, a simulator fails to boot/install, or state.json looks wrong
 ---
 
 # Debug ddagent
 
-1. Kiểm tra môi trường: `ddagent doctor` (thêm `--mock` nếu không có Xcode).
-2. Xem trạng thái: `ddagent status`, và `~/.ddagent/state.json` (hoặc `$DDAGENT_HOME`) để biết slot nào `dirty`, có `bindings` nào.
-3. Phân loại triệu chứng:
-   - **Cache-hit/incremental sai**: so sánh cache key trong `lib/fingerprint.js` (`CTX_KEYS`, `EXT`, `SKIP_DIRS`). Loại file ảnh hưởng build mà không nằm trong `EXT` sẽ không làm đổi key.
-   - **Slot kẹt/không cấp được**: xem lease và giới hạn `DDAGENT_MAX_SLOTS`, `DDAGENT_MIN_FREE_GB` trong `lib/pool.js`.
-   - **Boot/install lỗi**: lỗi CoreSimulator tạm thời được retry trong `lib/backend.js` (`TRANSIENT`); lỗi khác xem log job qua `/api/jobs/<id>`.
-4. Tái hiện ở mock mode (`DDAGENT_MOCK=1`) trước khi nghi ngờ Xcode.
-5. Sửa xong thì chạy `npm test`.
+1. Check the environment: `ddagent doctor` (add `--mock` if Xcode is unavailable).
+2. Inspect state: `ddagent status`, and `~/.ddagent/state.json` (or `$DDAGENT_HOME`) to see which slots are `dirty` and which `bindings` exist.
+3. Classify the symptom:
+   - **Wrong cache-hit/incremental**: compare the cache key inputs in `lib/fingerprint.js` (`CTX_KEYS`, `EXT`, `SKIP_DIRS`). A build-relevant file type missing from `EXT` does not change the key.
+   - **Slot stuck / cannot be allocated**: check the lease and the `DDAGENT_MAX_SLOTS` and `DDAGENT_MIN_FREE_GB` limits in `lib/pool.js`.
+   - **Boot/install failure**: transient CoreSimulator errors are retried in `lib/backend.js` (`TRANSIENT`); for anything else read the job log via `/api/jobs/<id>`.
+4. Reproduce in mock mode (`DDAGENT_MOCK=1`) before suspecting Xcode.
+5. After a fix, run `npm test`.
 
-Daemon cũ còn chạy giữ port 7777 là nguyên nhân hay gặp: kiểm tra `curl localhost:7777/api/ping`.
+A stale daemon still holding port 7777 is a common cause: check `curl localhost:7777/api/ping`.

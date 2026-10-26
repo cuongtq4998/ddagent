@@ -1,24 +1,24 @@
 ---
 name: ddagent-lane
-description: Dùng khi một agent cần chạy app trên simulator iOS/iPadOS qua ddagent cùng lúc với các agent khác. Xin lane (1 simulator riêng, tối đa 4), chạy, rồi nhả lane
+description: Use when an agent needs to run an app on an iOS/iPadOS simulator through ddagent while other agents do the same. Acquire a lane (one dedicated simulator, max 4), run, then release it
 ---
 
-# Dùng simulator qua lane của ddagent
+# Use a simulator through a ddagent lane
 
-Mỗi agent giữ **một lane = một simulator có sẵn** trong suốt phiên làm việc. Tối đa 4 lane cùng lúc; agent thứ 5 tự chờ đến khi có lane được nhả. Không tạo simulator mới, chỉ tái sử dụng.
+Each agent holds **one lane = one existing simulator** for the whole session. At most 4 lanes exist at once; a fifth agent waits until a lane is released. ddagent never creates simulators, it only reuses them.
 
 ```
 D=ddagent
-LANE=$($D lane acquire --owner <tên-agent>)      # chờ nếu 4 lane đang bận; in ra id lane
-$D run --lane $LANE --project <đường-dẫn>.xcodeproj --scheme <scheme>   # lặp lại mỗi khi sửa code
-$D lane release $LANE                              # BẮT BUỘC khi xong, kể cả khi lỗi
+LANE=$($D lane acquire --owner <agent-name>)      # waits while all 4 lanes are busy; prints the lane id
+$D run --lane $LANE --project <path>.xcodeproj --scheme <scheme>   # repeat after every code change
+$D lane release $LANE                              # REQUIRED when done, even on failure
 ```
 
-Quy tắc:
-- Luôn `release` khi xong. Lane bị bỏ quên sẽ tự nhả sau `DDAGENT_LANE_TTL_MIN` phút (mặc định 30) và chỉ khi không có job đang chạy.
-- Dùng cùng `--owner` cho cùng một agent: xin lại sẽ nhận đúng lane hoặc simulator cũ, và lần `run` sau dùng lại DerivedData cũ (incremental / cache-hit).
-- Muốn loại thiết bị cụ thể: `lane acquire --target "iPhone 17"`.
-- `lane list` xem lane đang giữ và hàng đợi; `status` xem slot DerivedData.
-- Lần chạy đầu tiên tự mở dashboard một lần; các agent sau không mở lại. Tắt bằng `DDAGENT_NO_OPEN=1` hoặc `--no-open`.
-- Chạy thật cần `unset DDAGENT_MOCK` (settings.json đặt mặc định bằng 1) và `DEVELOPER_DIR` trỏ vào Xcode. Đặt `DDAGENT_MAX_SLOTS` ≥ số lane (mặc định bằng `DDAGENT_MAX_LANES`, 4).
-- Nếu job báo "not enough free disk": giải phóng ổ đĩa hoặc hạ `DDAGENT_MIN_FREE_GB`.
+Rules:
+- Always `release` when done. An abandoned lane is released after `DDAGENT_LANE_TTL_MIN` minutes (default 30), and only when no job is running.
+- Use the same `--owner` for the same agent: re-acquiring returns the same lane or simulator, and the next `run` reuses the old DerivedData (incremental / cache-hit).
+- To pick a specific device: `lane acquire --target "iPhone 17"`.
+- `lane list` shows held lanes and the queue; `status` shows the DerivedData slots.
+- The first run opens the dashboard once; later agents do not reopen it. Disable with `DDAGENT_NO_OPEN=1` or `--no-open`.
+- Real runs need `DEVELOPER_DIR` pointing at a full Xcode (and `DDAGENT_MOCK` unset). Keep `DDAGENT_MAX_SLOTS` >= the lane count (defaults to `DDAGENT_MAX_LANES`, 4).
+- If a job reports "not enough free disk": free disk space or lower `DDAGENT_MIN_FREE_GB`.
