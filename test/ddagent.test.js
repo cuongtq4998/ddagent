@@ -4,6 +4,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { spawnSync } = require('child_process');
 const { Pool } = require('../lib/pool');
 const { Runner } = require('../lib/runner');
 const { mockBackend } = require('../lib/backend');
@@ -247,4 +248,36 @@ test('init: copies skills, merges permissions without dropping existing ones, is
   const second = initRepo(repo);
   assert.strictEqual(second.permissionsAdded.length, 0);
   assert.strictEqual(second.skills.copied.length, 0);
+});
+
+test('cli: the dashboard opens by default once per daemon, and --no-open suppresses it', () => {
+  const bin = path.join(tmp(), 'bin');
+  fs.mkdirSync(bin);
+  const log = path.join(bin, 'open.log');
+  fs.writeFileSync(path.join(bin, 'open'), `#!/bin/sh\necho "$1" >> ${log}\n`, { mode: 0o755 });
+  const cli = path.join(__dirname, '..', 'bin', 'ddagent');
+  const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  const count = () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\n').filter(Boolean).length : 0);
+  // `open` is spawned detached and can land well after the CLI returns: poll for a positive, wait out a negative.
+  const waitForOpens = (n) => { for (let i = 0; i < 50 && count() < n; i++) sleep(100); return count(); };
+  const settledOpens = () => { sleep(1500); return count(); };
+  const withDaemon = (port, fn) => {
+    const home = tmp();
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, DDAGENT_HOME: home, DDAGENT_PORT: String(port), DDAGENT_MOCK: '1' };
+    delete env.DDAGENT_NO_OPEN;
+    const acquire = (...extra) => spawnSync(process.execPath, [cli, 'lane', 'acquire', '--owner', `o${Math.random()}`, ...extra], { env, encoding: 'utf8' });
+    try { fn(acquire); } finally {
+      try { process.kill(JSON.parse(fs.readFileSync(path.join(home, 'daemon.json'), 'utf8')).pid); } catch { /* already gone */ }
+    }
+  };
+  withDaemon(17811, (acquire) => {
+    acquire();
+    assert.equal(waitForOpens(1), 1, 'first agent opens the dashboard');
+    acquire();
+    assert.equal(settledOpens(), 1, 'second agent does not reopen it');
+  });
+  withDaemon(17812, (acquire) => {
+    acquire('--no-open');
+    assert.equal(settledOpens(), 1, '--no-open opens nothing new');
+  });
 });
