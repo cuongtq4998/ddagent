@@ -1,6 +1,6 @@
 # ddagent
 
-A local daemon, CLI and web dashboard that lets **several coding agents (and humans) build and run an iOS/iPadOS app on the same Mac without stepping on each other**.
+A local daemon, CLI and web dashboard that lets **several coding agents (and humans) build and run an iOS/iPadOS app, or run Android builds and instrumented tests on emulators, on the same Mac without stepping on each other**.
 
 It solves three problems that appear as soon as more than one agent works on an Xcode project:
 
@@ -16,13 +16,14 @@ It solves three problems that appear as soon as more than one agent works on an 
 
 > The screenshots were captured with Playwright against the daemon in mock mode (fake simulators, no Xcode).
 
-> Status: iOS/iPadOS simulators only. Physical devices and Android are not supported yet.
+> Status: iOS/iPadOS simulators and Android emulators (existing AVDs). Physical devices are not supported. The Android path is unit-tested in mock mode; see "Android" below for what is not yet verified against a real emulator.
 
 Zero dependencies: Node.js built-ins only.
 
 ## Requirements
 
 - macOS with full Xcode (not just Command Line Tools) and at least one available iOS simulator runtime. Use iOS 17.5+ if older runtimes are unreliable on your machine.
+- For Android lanes: JDK 17 or newer, the Android SDK (`ANDROID_HOME`, or the default `~/Library/Android/sdk`) with `adb` and `emulator`, at least one existing AVD, and a `gradlew` in the project. Not needed for iOS-only use.
 - Node.js 18.15 or newer (`fs.statfsSync` is used for the disk check).
 - `git`, and access to GitHub if the repository is private (SSH key or token).
 
@@ -37,7 +38,9 @@ npm i -g github:cuongtq4998/ddagent      # install; the same command updates it
 Make sure `$(npm prefix -g)/bin` is on your `PATH`, then check the setup:
 
 ```
-ddagent doctor            # checks xcode-select, xcodebuild, first-launch/license, simulators, free disk
+ddagent doctor            # iOS: xcode-select, xcodebuild, first-launch/license, simulators, free disk
+                          # Android: JDK 17+, Android SDK, adb, emulator, AVDs, free disk
+ddagent doctor --platform android   # only the Android checks (and --platform ios)
 ```
 
 If `doctor` reports that Xcode is missing, either run `sudo xcode-select -s /Applications/Xcode.app` once, or prefix commands with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` (no sudo).
@@ -79,15 +82,35 @@ ddagent lane list
 - Use the same `--owner` for the same agent: it gets the same lane or simulator back, and its next `run` reuses the same DerivedData.
 - `lane acquire --target "iPhone 17"` asks for a specific device.
 
+## Android
+
+A lane can also be one **existing Android virtual device (AVD)**. ddagent never creates AVDs; list yours with `emulator -list-avds`.
+
+```
+LANE=$(ddagent lane acquire --platform android --owner agent-1 [--target Medium_Phone_API_36.1])
+ddagent run --lane $LANE --project /abs/path/to/android --module app --task assembleDebug
+ddagent run --lane $LANE --project /abs/path/to/android --module app --task connectedDebugAndroidTest
+ddagent lane release $LANE                            # stops the emulator ddagent booted
+```
+
+- `--task` is `assembleDebug` or `connectedDebugAndroidTest`; `--module` defaults to `app`. Gradle is always the project's own `./gradlew`.
+- The AVD is booted on demand (headless, `-no-snapshot-save`) and ddagent waits for `sys.boot_completed` (`DDAGENT_ANDROID_BOOT_TIMEOUT_S`, default 300). An emulator that was already running is reused and never killed; one ddagent booted is stopped when the lane is released or expires.
+- Each lane gets its own Gradle `--project-cache-dir`; the Gradle user home is shared (set `DDAGENT_GRADLE_USER_HOME` to move it). Runs on the same project directory are serialised because `build/` lives in the source tree; use separate git worktrees to build in parallel.
+- Evidence goes to `~/.ddagent/artifacts/<lane id>/<job id>/` (the path is printed): `junit/*.xml`, `logcat.txt`, `screenshot-final.png`, `gradle.log`, and anything the tests wrote to `/sdcard/Pictures/ddagent` in `device-screenshots/`. It is collected even when the build or the tests fail. The newest 20 job folders are kept.
+- The lane limit (`DDAGENT_MAX_LANES`) and the FIFO queue are shared by iOS and Android lanes.
+- iOS-only features (`prewarm`, DerivedData slots, `--scheme`) do not apply to Android lanes.
+
+Design and trade-offs: `docs/android-lanes.md`.
+
 ## Commands
 
 | Command | Purpose |
 |---|---|
-| `ddagent run` / `prewarm` | Build (if needed), boot, install and launch (`prewarm` skips launch) |
-| `ddagent lane acquire` / `release` / `list` | Exclusive simulator per agent |
-| `ddagent status` | Slots and simulators in the terminal |
+| `ddagent run` / `prewarm` | iOS: build (if needed), boot, install and launch (`prewarm` skips launch). Android lane: boot the AVD, run a Gradle task, collect artifacts (`run` only) |
+| `ddagent lane acquire` / `release` / `list` | Exclusive simulator or AVD per agent (`--platform ios\|android`, default `ios`) |
+| `ddagent status` | Slots, simulators and AVDs in the terminal |
 | `ddagent dashboard` | Print the dashboard URL (includes the access token) |
-| `ddagent doctor` | Environment checks |
+| `ddagent doctor [--platform ios\|android]` | Environment checks |
 | `ddagent init [dir]` | Install skills and permissions into a repository |
 | `ddagent start [--mock]` | Run the daemon in the foreground |
 
@@ -101,7 +124,8 @@ ddagent CLI --HTTP--> daemon (server.js)
                         |- Pool         DerivedData slots, build leases, bindings, disk floor
                         |- Lanes        exclusive simulator per agent, FIFO queue, idle expiry
                         |- Fingerprint  cache key from build context + file contents
-                        |- Backend      real (xcodebuild/xcrun) or mock
+                        |- AndroidRunner job = boot AVD -> Gradle task -> collect artifacts (shares the job list and device locks)
+                        |- Backend      real (xcodebuild/xcrun, plus lib/android.js: adb/emulator/Gradle) or mock
                         '- Store        state.json (only the daemon writes it)
 dashboard (browser) <--SSE-- daemon
 ```
@@ -126,11 +150,12 @@ The page is served by the daemon on `127.0.0.1` and updates live over a server-s
 
 | Section | What it shows |
 |---|---|
-| Header | Mock-mode indicator and the `doctor` check results |
+| Header | Mock-mode indicator and the `doctor` check results (iOS and Android) |
+| Lanes | Every held lane (iOS and Android) with owner, device, activity and age, plus the waiting queue |
 | Speed | Average time-to-ready and build time for cold, incremental and cache-hit runs |
 | DerivedData slots | State (`idle`, `building`, `installing`), cache key, scheme, which simulators it serves (`stale` means the installed key is older than the slot's key), last use, size |
-| Simulators / devices | Name, OS, boot state, busy/idle, bound slot, last run |
-| Jobs | Phase timeline per job and per target (allocating-slot, building, booting, installing, launching; skipped phases are greyed), live build log |
+| Simulators / devices | Name, platform, OS, boot state, busy/idle, bound slot, last run (Android AVDs included) |
+| Jobs | Phase timeline per job and per target (iOS: allocating-slot, building, booting, installing, launching; Android: booting, building, collecting; skipped phases are greyed), live build log, Android test counts and artifact folder |
 | History | The last runs with mode, status, build and ready times |
 
 Access is protected by a random token stored in `~/.ddagent/token` (mode 0600) and sent with every request. The server also rejects requests whose `Host` or `Origin` is not the local address and sends no CORS headers.
@@ -142,26 +167,31 @@ State lives in `~/.ddagent` (override with `DDAGENT_HOME`).
 | Variable | Default | Meaning |
 |---|---|---|
 | `DDAGENT_PORT` | 7777 | Daemon port |
-| `DDAGENT_MAX_LANES` | 4 | Maximum concurrent lanes |
+| `DDAGENT_MAX_LANES` | 4 | Maximum concurrent lanes, iOS and Android together |
 | `DDAGENT_MAX_SLOTS` | = max lanes | Maximum DerivedData slots |
-| `DDAGENT_MIN_FREE_GB` | 5 | Below this, no new slot is created and the job fails fast |
+| `DDAGENT_MIN_FREE_GB` | 5 | Below this, no new slot is created and the job fails fast (Android jobs fail fast too) |
+| `DDAGENT_ANDROID_BOOT_TIMEOUT_S` | 300 | Seconds to wait for an AVD to finish booting |
+| `DDAGENT_GRADLE_USER_HOME` | unset | Gradle user home for Android runs (default: Gradle's own `~/.gradle`) |
 | `DDAGENT_LANE_TTL_MIN` | 30 | Idle lane expiry in minutes |
 | `DDAGENT_NO_OPEN` | unset | Do not auto-open the dashboard |
-| `DDAGENT_MOCK` | unset | `1` = fake simulators and builds, no Xcode needed |
+| `DDAGENT_MOCK` | unset | `1` = fake simulators, AVDs and builds, no Xcode, emulator or JDK needed |
+| `DDAGENT_MOCK_ANDROID_FAIL` | unset | Mock mode only: `boot` or `gradle` makes the fake Android job fail (for testing failure paths) |
 | `DDAGENT_MOCK_SPEED` | 1 | Scale mock delays |
 
 ## For agents
 
 Read the skills installed by `ddagent init`:
 
-- `ddagent-lane`: acquire a lane, run, release. Always release.
+- `ddagent-lane`: acquire a lane (iOS simulator or Android AVD), run, release. Always release.
 - `ddagent-debug`: wrong cache-hit/incremental, stuck slots, boot/install failures, odd `state.json`.
 
-Rules of thumb: reuse the same `--owner`; never create simulators yourself; if a stale daemon holds the port, check `curl localhost:7777/api/ping`.
+Rules of thumb: reuse the same `--owner`; never create simulators or AVDs yourself; if a stale daemon holds the port, check `curl localhost:7777/api/ping`.
 
 ## Troubleshooting
 
-- `doctor` fails on `xcode-select`: point it at a full Xcode (see Install).
+- `doctor` fails on `xcode-select`: point it at a full Xcode (see Install). On a host without Xcode use `ddagent doctor --platform android`.
+- `doctor` fails on `JDK 17+`: install a JDK 17 or newer and set `JAVA_HOME` (on macOS ddagent also asks `/usr/libexec/java_home -v 17`).
+- Android job fails with "did not finish booting": the emulator log is `~/.ddagent/android/emulator-<avd>.log`; raise `DDAGENT_ANDROID_BOOT_TIMEOUT_S` on a slow host.
 - "not enough free disk": free space or lower `DDAGENT_MIN_FREE_GB`.
 - All lanes busy: wait, or run `ddagent lane list` to see who holds them.
 - Wrong cache result: a build-relevant file type may be missing from `EXT` in `lib/fingerprint.js`.
@@ -170,7 +200,7 @@ Rules of thumb: reuse the same `--owner`; never create simulators yourself; if a
 ## Development
 
 ```
-npm test                       # node --test test/ddagent.test.js
+npm test                       # node --test test/ddagent.test.js test/android.test.js
 DDAGENT_MOCK=1 node server.js  # run the daemon directly in mock mode
 ```
 
