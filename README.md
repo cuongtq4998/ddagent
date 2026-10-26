@@ -8,6 +8,14 @@ It solves three problems that appear as soon as more than one agent works on an 
 2. **Simulator collisions.** Two agents installing onto the same simulator break each other's runs. ddagent hands out *lanes*: one agent holds one existing simulator exclusively until it releases it.
 3. **No visibility.** A live dashboard shows slots, simulators, jobs and timings so you can see what every agent is doing.
 
+![ddagent dashboard while four agents build in parallel](docs/images/dashboard-running.png)
+*Four agents building at once: each holds its own lane (simulator) and DerivedData slot, with a live phase timeline and build log per job.*
+
+![ddagent dashboard after the runs finished](docs/images/dashboard-history.png)
+*After the runs: cold, incremental and cache-hit timings, which slot serves which simulator, and the run history.*
+
+> The screenshots were captured with Playwright against the daemon in mock mode (fake simulators, no Xcode).
+
 > Status: iOS/iPadOS simulators only. Physical devices and Android are not supported yet.
 
 Zero dependencies: Node.js built-ins only.
