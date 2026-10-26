@@ -5,7 +5,7 @@
   "description": "Orchestrates a pool of Xcode DerivedData slots for many iOS simulators, with a web dashboard",
   "bin": { "ddagent": "bin/ddagent" },
   "scripts": {
-    "test": "node --test test/ddagent.test.js",
+    "test": "node --test test/ddagent.test.js test/android.test.js",
     "start": "node server.js"
   }
 }
