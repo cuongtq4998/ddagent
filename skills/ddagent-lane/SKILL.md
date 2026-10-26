@@ -19,6 +19,6 @@ Rules:
 - Use the same `--owner` for the same agent: re-acquiring returns the same lane or simulator, and the next `run` reuses the old DerivedData (incremental / cache-hit).
 - To pick a specific device: `lane acquire --target "iPhone 17"`.
 - `lane list` shows held lanes and the queue; `status` shows the DerivedData slots.
-- The first run opens the dashboard once; later agents do not reopen it. Disable with `DDAGENT_NO_OPEN=1` or `--no-open`.
+- The dashboard opens by default on the first `run` or `lane acquire`, so the human can watch every agent; later agents do not reopen it. Never pass `--no-open` or set `DDAGENT_NO_OPEN` yourself: only the human may turn it off.
 - Real runs need `DEVELOPER_DIR` pointing at a full Xcode (and `DDAGENT_MOCK` unset). Keep `DDAGENT_MAX_SLOTS` >= the lane count (defaults to `DDAGENT_MAX_LANES`, 4).
 - If a job reports "not enough free disk": free disk space or lower `DDAGENT_MIN_FREE_GB`.
