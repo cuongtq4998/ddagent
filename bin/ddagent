@@ -1,0 +1,161 @@
+#!/usr/bin/env node
+'use strict';
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const http = require('http');
+const { spawn } = require('child_process');
+
+const HOME = process.env.DDAGENT_HOME || path.join(os.homedir(), '.ddagent');
+const SERVER = path.join(__dirname, '..', 'server.js');
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function parse(argv) {
+  const o = { _: [], target: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--target' || a === '-t') o.target.push(argv[++i]);
+    else if (a.startsWith('--')) { const k = a.slice(2); o[k] = argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[++i] : true; } else o._.push(a);
+  }
+  return o;
+}
+
+const daemonInfo = () => { try { return JSON.parse(fs.readFileSync(path.join(HOME, 'daemon.json'), 'utf8')); } catch { return null; } };
+const token = () => fs.readFileSync(path.join(HOME, 'token'), 'utf8').trim();
+
+function call(method, p, body) {
+  const d = daemonInfo();
+  return new Promise((resolve, reject) => {
+    const data = body ? JSON.stringify(body) : null;
+    const req = http.request({
+      host: '127.0.0.1', port: d.port, path: p, method,
+      headers: { 'x-dd-token': token(), 'content-type': 'application/json', ...(data ? { 'content-length': Buffer.byteLength(data) } : {}) },
+    }, (res) => {
+      let b = '';
+      res.on('data', (c) => { b += c; });
+      res.on('end', () => { const j = b ? JSON.parse(b) : {}; res.statusCode >= 400 ? reject(new Error(j.error || res.statusCode)) : resolve(j); });
+    });
+    req.on('error', reject);
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
+async function alive() {
+  const d = daemonInfo();
+  if (!d) return false;
+  try { process.kill(d.pid, 0); return true; } catch { return false; }
+}
+
+async function ensureDaemon(o) {
+  if (await alive()) return;
+  fs.mkdirSync(HOME, { recursive: true });
+  const log = fs.openSync(path.join(HOME, 'daemon.log'), 'a');
+  const env = { ...process.env, ...(o.mock ? { DDAGENT_MOCK: '1' } : {}) };
+  spawn(process.execPath, [SERVER], { detached: true, stdio: ['ignore', log, log], env }).unref();
+  for (let i = 0; i < 50; i++) { await sleep(100); if (await alive()) return; }
+  throw new Error(`daemon failed to start; see ${path.join(HOME, 'daemon.log')}`);
+}
+
+const fmt = (ms) => (ms == null ? '-' : ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`);
+
+function findProject(o) {
+  if (o.project) return path.resolve(o.project);
+  const f = fs.readdirSync(process.cwd()).find((n) => /\.xcworkspace$/.test(n)) || fs.readdirSync(process.cwd()).find((n) => /\.xcodeproj$/.test(n));
+  if (!f) throw new Error('no .xcodeproj/.xcworkspace in cwd; pass --project');
+  return path.resolve(f);
+}
+
+// First agent to get here opens the dashboard; the daemon tells later ones it is already open.
+async function openDashboardOnce(o) {
+  if (o['no-open'] || process.env.DDAGENT_NO_OPEN === '1') return;
+  const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'linux' ? 'xdg-open' : null;
+  if (!cmd) return;
+  try {
+    if ((await call('POST', '/api/dashboard/claim')).open) return;
+    const url = `http://127.0.0.1:${daemonInfo().port}/#token=${token()}`;
+    spawn(cmd, [url], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
+    console.error(`dashboard opened: http://127.0.0.1:${daemonInfo().port}/`);
+  } catch { /* the dashboard is a convenience; never fail a run over it */ }
+}
+
+async function runJob(kind, o) {
+  await ensureDaemon(o);
+  await openDashboardOnce(o);
+  if (!o.target.length && !o.lane) throw new Error('pass at least one --target "iPhone 16" (or --lane <id>)');
+  const project = findProject(o);
+  const scheme = o.scheme || path.basename(project).replace(/\.(xcodeproj|xcworkspace)$/, '');
+  const { id } = await call('POST', `/api/${kind}`, { project, scheme, config: o.config, targets: o.target, lane: o.lane || undefined, rebuild: !!o.rebuild });
+  let shown = 0;
+  for (;;) {
+    const j = await call('GET', `/api/jobs/${id}`);
+    const flat = [...j.phases.map((p) => ({ ...p, who: '' })), ...j.targets.flatMap((t) => t.phases.map((p) => ({ ...p, who: ` [${t.name}]` })))];
+    for (; shown < flat.length && flat[shown].endedAt; shown++) {
+      const p = flat[shown];
+      console.log(`  ${p.name}${p.who}: ${p.status === 'skipped' ? 'skipped' : fmt(p.endedAt - p.startedAt)}`);
+    }
+    if (j.endedAt) {
+      console.log(`${j.status.toUpperCase()}  mode=${j.mode}  slot=${j.slotId}  ready=${j.targets.map((t) => `${t.name}:${fmt(t.readyMs)}`).join(', ')}`);
+      if (j.error) console.error(j.error);
+      j.targets.filter((t) => t.error).forEach((t) => console.error(`  ${t.name}: ${t.error}`));
+      return j.status === 'done' ? 0 : 1;
+    }
+    await sleep(300);
+  }
+}
+
+async function main() {
+  const o = parse(process.argv.slice(2));
+  const cmd = o._[0];
+  if (cmd === 'start') { if (o.mock) process.env.DDAGENT_MOCK = '1'; if (o.port) process.env.DDAGENT_PORT = o.port; require(SERVER); return 'daemon'; }
+  if (cmd === 'run' || cmd === 'prewarm') return runJob(cmd, o);
+  if (cmd === 'status') {
+    await ensureDaemon(o);
+    const s = await call('GET', '/api/state');
+    console.log(`SLOTS${s.mock ? ' (mock)' : ''}`);
+    for (const x of s.slots) {
+      const lu = x.lastUsed ? `last: ${x.lastUsed.name} (${x.lastUsed.result}) ${new Date(x.lastUsed.at).toLocaleTimeString()}` : 'never used';
+      console.log(`  ${x.id}  ${x.state.padEnd(10)} key=${x.key || '-'}  bound=[${x.bindings.map((b) => b.name + (b.stale ? '*' : '')).join(', ')}]  ${lu}`);
+    }
+    console.log('TARGETS');
+    for (const t of s.targets) console.log(`  ${t.name.padEnd(22)} ${t.state.padEnd(9)} ${t.busy ? 'busy' : 'idle'}  slot=${t.boundSlot || '-'}`);
+    return 0;
+  }
+  if (cmd === 'lane') {
+    await ensureDaemon(o);
+    const sub = o._[1];
+    if (sub === 'acquire') {
+      await openDashboardOnce(o);
+      const cur = (await call('GET', '/api/lanes'));
+      if (cur.active.length >= cur.max) console.error(`all ${cur.max} lanes busy (${cur.waiting.length} waiting): waiting for a free lane...`);
+      const l = await call('POST', '/api/lanes', { owner: o.owner, target: o.target[0] });
+      console.error(`lane ready after ${fmt(l.waitedMs)}: ${l.name} (${l.udid})`);
+      console.log(l.id);
+      return 0;
+    }
+    if (sub === 'release') { await call('POST', `/api/lanes/${o._[2]}/release`); console.log('released'); return 0; }
+    if (sub === 'list') {
+      const s = await call('GET', '/api/lanes');
+      console.log(`LANES ${s.active.length}/${s.max}`);
+      for (const l of s.active) console.log(`  ${l.id}  owner=${l.owner}  ${l.name}  ${l.busy ? 'busy' : 'idle'}  held ${fmt(Date.now() - l.acquiredAt)}`);
+      for (const w of s.waiting) console.log(`  waiting: ${w.owner}${w.want ? ` (wants ${w.want})` : ''}`);
+      return 0;
+    }
+    throw new Error('usage: ddagent lane acquire [--owner NAME] [--target "iPhone 16"] | release <id> | list');
+  }
+  if (cmd === 'doctor') {
+    await ensureDaemon(o);
+    const d = await call('POST', '/api/doctor');
+    for (const c of d.checks) console.log(`  ${c.ok ? 'ok  ' : 'FAIL'} ${c.name}: ${c.detail}`);
+    return d.checks.every((c) => c.ok) ? 0 : 1;
+  }
+  if (cmd === 'dashboard') {
+    await ensureDaemon(o);
+    console.log(`http://127.0.0.1:${daemonInfo().port}/#token=${token()}`);
+    return 0;
+  }
+  console.log('usage: ddagent <start [--mock] | run | prewarm | lane | status | doctor | dashboard>\n  run|prewarm --target "iPhone 16" [--target ...] [--project X.xcodeproj] [--scheme S] [--config Debug] [--rebuild] [--mock]');
+  return 1;
+}
+
+main().then((c) => { if (c !== 'daemon') process.exit(c); }).catch((e) => { console.error(`error: ${e.message}`); process.exit(1); });

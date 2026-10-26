@@ -1,0 +1,11 @@
+{
+  "name": "ddagent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Orchestrates a pool of Xcode DerivedData slots for many iOS simulators, with a web dashboard",
+  "bin": { "ddagent": "bin/ddagent" },
+  "scripts": {
+    "test": "node --test test/ddagent.test.js",
+    "start": "node server.js"
+  }
+}

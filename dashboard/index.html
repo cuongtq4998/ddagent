@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ddagent</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1c2024;--mut:#6b7280;--line:#e5e7eb;--ok:#16a34a;--busy:#d97706;--bad:#dc2626;--idle:#2563eb;--cold:#7c3aed;--inc:#d97706;--hit:#16a34a}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#171a21;--fg:#e6e8eb;--mut:#8b93a1;--line:#2a2f3a}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,system-ui,sans-serif}
+header{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:14px 16px;border-bottom:1px solid var(--line)}
+h1{font-size:16px;margin:0}h2{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:0 0 8px}
+main{padding:16px;display:grid;gap:16px;max-width:1200px;margin:0 auto}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;overflow-x:auto}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}th{color:var(--mut);font-weight:500;font-size:12px}
+tr:last-child td{border-bottom:0}
+.pill{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;color:#fff}
+.idle{background:var(--idle)}.building,.installing,.running{background:var(--busy)}.ok,.done,.running-app{background:var(--ok)}.failed,.partial{background:var(--bad)}.queued{background:var(--mut)}
+.mut{color:var(--mut)}.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+.tile{border:1px solid var(--line);border-radius:8px;padding:10px}.tile b{font-size:20px;display:block}
+.badge{font-size:11px;padding:1px 6px;border-radius:4px;color:#fff;margin-left:6px}.cold{background:var(--cold)}.incremental{background:var(--inc)}.cache-hit{background:var(--hit)}
+.bar{display:flex;height:22px;border-radius:5px;overflow:hidden;background:var(--line);margin:4px 0}
+.seg{display:flex;align-items:center;padding:0 6px;font-size:11px;color:#fff;white-space:nowrap;overflow:hidden;min-width:2px}
+.seg.done{background:var(--ok)}.seg.running{background:var(--busy)}.seg.failed{background:var(--bad)}.seg.skipped{background:var(--mut);opacity:.6}
+pre{margin:6px 0 0;padding:8px;background:var(--bg);border-radius:6px;max-height:120px;overflow:auto;font-size:11px}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--bad);display:inline-block}.dot.on{background:var(--ok)}
+.chip{font-size:12px;padding:2px 8px;border-radius:6px;border:1px solid var(--line)}.chip.bad{border-color:var(--bad);color:var(--bad)}
+.job{border-top:1px solid var(--line);padding:10px 0}.job:first-of-type{border-top:0}
+</style>
+</head>
+<body>
+<header>
+  <span id="conn" class="dot" title="connection"></span><h1>ddagent</h1><span id="mode" class="mut"></span>
+  <span id="doctor" style="display:flex;gap:6px;flex-wrap:wrap"></span>
+</header>
+<main>
+  <section class="card"><h2>Speed: first run vs later runs (avg time to app ready)</h2><div id="stats" class="tiles"></div></section>
+  <section class="card"><h2>DerivedData slots</h2><div id="slots"></div></section>
+  <section class="card"><h2>Simulators / devices</h2><div id="targets"></div></section>
+  <section class="card"><h2>Jobs (phases)</h2><div id="jobs"></div></section>
+  <section class="card"><h2>History</h2><div id="history"></div></section>
+</main>
+<script>
+const tok = (location.hash.match(/token=([0-9a-f]+)/) || [])[1] || (() => { try { return sessionStorage.getItem('dd') } catch { return null } })();
+try { if (tok) sessionStorage.setItem('dd', tok); } catch {}
+if (location.hash) history.replaceState(null, '', location.pathname);
+
+const h = (tag, attrs, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) k === 'class' ? (e.className = v) : e.setAttribute(k, v);
+  for (const k of kids.flat()) if (k != null) e.append(k.nodeType ? k : document.createTextNode(String(k)));
+  return e;
+};
+const pill = (s, t) => h('span', { class: 'pill ' + s }, t || s);
+const fmt = (ms) => ms == null || isNaN(ms) ? '-' : ms < 1000 ? ms + 'ms' : (ms / 1000).toFixed(1) + 's';
+const gb = (kb) => kb ? (kb / 1048576).toFixed(2) + ' GB' : '-';
+const clock = (t) => t ? new Date(t).toLocaleTimeString() : '-';
+const table = (head, rows, empty) => rows.length
+  ? h('table', {}, h('thead', {}, h('tr', {}, head.map((x) => h('th', {}, x)))), h('tbody', {}, rows.map((r) => h('tr', {}, r.map((c) => h('td', {}, c))))))
+  : h('div', { class: 'mut' }, empty);
+const put = (id, node) => document.getElementById(id).replaceChildren(node);
+
+function bar(phases) {
+  const total = phases.reduce((a, p) => a + Math.max(1, (p.endedAt || Date.now()) - p.startedAt), 0) || 1;
+  return h('div', { class: 'bar' }, phases.map((p) => {
+    const d = (p.endedAt || Date.now()) - p.startedAt;
+    return h('div', { class: 'seg ' + p.status, style: `flex:${Math.max(d, total * 0.04)}`, title: p.error || '' }, `${p.name} ${p.status === 'skipped' ? 'skipped' : fmt(d)}`);
+  }));
+}
+
+function render(s) {
+  document.getElementById('mode').textContent = s.mock ? 'MOCK mode (no Xcode)' : '';
+  put('doctor', h('span', { style: 'display:contents' }, (s.doctor.running ? [h('span', { class: 'chip' }, 'init: checking...')] : s.doctor.checks.map((c) => h('span', { class: 'chip ' + (c.ok ? '' : 'bad'), title: c.detail }, (c.ok ? 'ok ' : 'FAIL ') + c.name)))));
+
+  const modes = ['cold', 'incremental', 'cache-hit'];
+  put('stats', h('div', { class: 'tiles', style: 'display:contents' }, modes.map((m) => {
+    const a = s.stats[m];
+    return h('div', { class: 'tile' }, h('span', { class: 'badge ' + m, style: 'margin:0' }, m), h('b', {}, a ? fmt(a.avgReadyMs) : '-'), h('span', { class: 'mut' }, a ? `${a.n} runs, build avg ${fmt(a.avgBuildMs)}` : 'no runs yet'));
+  })));
+
+  put('slots', table(['Slot', 'State', 'Key', 'Scheme', 'Serving (installed key)', 'Last used', 'Size'],
+    s.slots.map((x) => [
+      x.id, pill(x.state) , h('span', { class: 'mono' }, x.key || (x.dirty ? 'dirty' : '-')), x.scheme || '-',
+      x.bindings.length ? x.bindings.map((b) => h('div', {}, b.name, b.stale ? h('span', { class: 'mut' }, ' (stale)') : '', ' ', h('span', { class: 'mono mut' }, b.installedKey))) : h('span', { class: 'mut' }, 'nobody'),
+      x.lastUsed ? h('span', {}, x.lastUsed.name, ' ', pill(x.lastUsed.result === 'ok' ? 'ok' : x.lastUsed.result === 'started' ? 'running' : 'failed', x.lastUsed.result), ' ', h('span', { class: 'mut' }, clock(x.lastUsed.at))) : h('span', { class: 'mut' }, 'never'),
+      gb(x.sizeKB),
+    ]), 'No slots yet. Run: ddagent run --target "iPhone 16"'));
+
+  put('targets', s.targetsError ? h('div', { class: 'mut' }, 'Cannot list targets: ' + s.targetsError)
+    : table(['Name', 'OS', 'Boot state', 'Activity', 'DerivedData slot', 'Last run'],
+      s.targets.map((t) => [t.name, t.osVersion, t.state, pill(t.busy ? 'building' : 'idle', t.busy ? 'busy' : 'idle'),
+        t.boundSlot ? t.boundSlot + (t.stale ? ' (stale)' : '') : h('span', { class: 'mut' }, '-'),
+        t.lastRun ? h('span', {}, t.lastRun.result, ' ', h('span', { class: 'mut' }, clock(t.lastRun.at))) : h('span', { class: 'mut' }, '-')]), 'No targets'));
+
+  put('jobs', s.jobs.length ? h('div', {}, s.jobs.slice(0, 6).map((j) => h('div', { class: 'job' },
+    h('div', {}, pill(j.status), h('span', { class: 'badge ' + (j.mode || 'queued') }, j.mode || 'queued'), ' ', h('b', {}, j.scheme), ' ', h('span', { class: 'mut' }, `${j.prewarm ? 'prewarm · ' : ''}job ${j.id} · ${j.slotId || 'waiting for slot'} · ${clock(j.createdAt)}`)),
+    j.phases.length ? bar(j.phases) : null,
+    j.targets.map((t) => h('div', {}, h('span', { class: 'mut' }, t.name + ' '), t.phases.length ? bar(t.phases) : h('span', { class: 'mut' }, t.status), t.error ? h('div', { style: 'color:var(--bad)' }, t.error) : null, t.readyMs != null ? h('span', { class: 'mut' }, 'ready in ' + fmt(t.readyMs)) : null)),
+    j.error ? h('div', { style: 'color:var(--bad)' }, j.error) : null,
+    j.status === 'running' && j.log.length ? h('pre', {}, j.log.join('\n')) : null))) : h('div', { class: 'mut' }, 'No jobs yet'));
+
+  put('history', table(['Time', 'Scheme', 'Mode', 'Status', 'Build', 'Ready', 'Targets'],
+    s.history.map((x) => [clock(x.at), x.scheme, h('span', { class: 'badge ' + x.mode, style: 'margin:0' }, (x.prewarm ? 'prewarm ' : '') + x.mode), x.status, fmt(x.buildMs), fmt(x.readyMs), x.targets.join(', ')]), 'No history'));
+}
+
+function connect() {
+  const es = new EventSource('/events?token=' + encodeURIComponent(tok || ''));
+  const dot = document.getElementById('conn');
+  es.onopen = () => dot.classList.add('on');
+  es.onerror = () => { dot.classList.remove('on'); };
+  es.onmessage = (m) => { try { render(JSON.parse(m.data)); } catch (e) { console.error(e); } };
+}
+if (!tok) document.querySelector('main').prepend(h('div', { class: 'card' }, 'Missing token. Open the URL from: ddagent dashboard'));
+else connect();
+setInterval(() => document.querySelectorAll('.seg.running').length && 0, 1000);
+</script>
+</body>
+</html>
