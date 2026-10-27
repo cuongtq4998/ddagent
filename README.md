@@ -148,6 +148,7 @@ State lives in `~/.ddagent` (override with `DDAGENT_HOME`).
 | `DDAGENT_LANE_TTL_MIN` | 30 | Idle lane expiry in minutes |
 | `DDAGENT_NO_OPEN` | unset | Do not auto-open the dashboard |
 | `DDAGENT_MOCK` | unset | `1` = fake simulators and builds, no Xcode needed |
+| `DDAGENT_SKIP_PLUGIN_VALIDATION` | unset | `1` = pass `-skipPackagePluginValidation` to `xcodebuild` (needed for packages with build-tool plugins, e.g. Pillarbox) |
 | `DDAGENT_MOCK_SPEED` | 1 | Scale mock delays |
 
 ## For agents
