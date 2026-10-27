@@ -139,6 +139,24 @@ test('runner: two different projects in parallel never share a slot', async () =
   assert.equal(j1.status, 'done'); assert.equal(j2.status, 'done');
 });
 
+test('runner: a tvOS job gets its own cache key (the SDK is part of it)', async () => {
+  const { proj } = makeProject();
+  const { runner } = makeRunner();
+  const tv = await finish(runner, runner.submit({ project: proj, scheme: 'a', targets: ['Apple TV 4K (3rd generation) 2'] }));
+  const ios = await finish(runner, runner.submit({ project: proj, scheme: 'a', targets: ['iPhone 16'] }));
+  assert.equal(tv.status, 'done');
+  assert.equal(ios.status, 'done');
+  assert.notEqual(tv.key, ios.key);
+});
+
+test('runner: one job cannot mix iOS and tvOS targets', async () => {
+  const { proj } = makeProject();
+  const { runner } = makeRunner();
+  const j = await finish(runner, runner.submit({ project: proj, scheme: 'a', targets: ['iPhone 16', 'Apple TV'] }));
+  assert.equal(j.status, 'failed');
+  assert.match(j.error, /several platforms/);
+});
+
 test('runner: rejects unsafe input', () => {
   const { runner } = makeRunner();
   assert.throws(() => runner.submit({ project: 'rel.xcodeproj', scheme: 'a', targets: ['x'] }));
