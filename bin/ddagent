@@ -53,7 +53,7 @@ async function ensureDaemon(o) {
   const log = fs.openSync(path.join(HOME, 'daemon.log'), 'a');
   const env = { ...process.env, ...(o.mock ? { DDAGENT_MOCK: '1' } : {}) };
   spawn(process.execPath, [SERVER], { detached: true, stdio: ['ignore', log, log], env }).unref();
-  for (let i = 0; i < 50; i++) { await sleep(100); if (await alive()) return; }
+  for (let i = 0; i < 150; i++) { await sleep(100); if (await alive()) return; } // first start lists simulators and AVDs before it is ready
   throw new Error(`daemon failed to start; see ${path.join(HOME, 'daemon.log')}`);
 }
 
@@ -79,13 +79,28 @@ async function openDashboardOnce(o) {
   } catch { /* the dashboard is a convenience; never fail a run over it */ }
 }
 
+async function laneInfo(id) {
+  return (await call('GET', '/api/lanes')).active.find((l) => l.id === id) || null;
+}
+
 async function runJob(kind, o) {
   await ensureDaemon(o);
   await openDashboardOnce(o);
   if (!o.target.length && !o.lane) throw new Error('pass at least one --target "iPhone 16" (or --lane <id>)');
+  const lane = o.lane ? await laneInfo(o.lane) : null;
+  if (lane && lane.platform === 'android') {
+    if (kind === 'prewarm') throw new Error('prewarm is iOS only; for Android use: run --lane <id> --project <dir> --module app --task assembleDebug');
+    const project = path.resolve(o.project || '.');
+    const { id } = await call('POST', '/api/android/run', { lane: lane.id, project, module: o.module || 'app', task: o.task || 'assembleDebug' });
+    return followJob(id);
+  }
   const project = findProject(o);
   const scheme = o.scheme || path.basename(project).replace(/\.(xcodeproj|xcworkspace)$/, '');
   const { id } = await call('POST', `/api/${kind}`, { project, scheme, config: o.config, targets: o.target, lane: o.lane || undefined, rebuild: !!o.rebuild });
+  return followJob(id);
+}
+
+async function followJob(id) {
   let shown = 0;
   for (;;) {
     const j = await call('GET', `/api/jobs/${id}`);
@@ -95,7 +110,11 @@ async function runJob(kind, o) {
       console.log(`  ${p.name}${p.who}: ${p.status === 'skipped' ? 'skipped' : fmt(p.endedAt - p.startedAt)}`);
     }
     if (j.endedAt) {
-      console.log(`${j.status.toUpperCase()}  mode=${j.mode}  slot=${j.slotId}  ready=${j.targets.map((t) => `${t.name}:${fmt(t.readyMs)}`).join(', ')}`);
+      if (j.platform === 'android') {
+        const t = j.tests;
+        console.log(`${j.status.toUpperCase()}  mode=${j.mode}  ready=${j.targets.map((x) => `${x.name}:${fmt(x.readyMs)}`).join(', ')}${t ? `  tests=${t.tests} failures=${t.failures} errors=${t.errors} skipped=${t.skipped}` : ''}`);
+        if (j.artifacts) console.log(`artifacts: ${j.artifacts}`);
+      } else console.log(`${j.status.toUpperCase()}  mode=${j.mode}  slot=${j.slotId}  ready=${j.targets.map((t) => `${t.name}:${fmt(t.readyMs)}`).join(', ')}`);
       if (j.error) console.error(j.error);
       j.targets.filter((t) => t.error).forEach((t) => console.error(`  ${t.name}: ${t.error}`));
       return j.status === 'done' ? 0 : 1;
@@ -124,7 +143,7 @@ async function main() {
       console.log(`  ${x.id}  ${x.state.padEnd(10)} key=${x.key || '-'}  bound=[${x.bindings.map((b) => b.name + (b.stale ? '*' : '')).join(', ')}]  ${lu}`);
     }
     console.log('TARGETS');
-    for (const t of s.targets) console.log(`  ${t.name.padEnd(22)} ${t.state.padEnd(9)} ${t.busy ? 'busy' : 'idle'}  slot=${t.boundSlot || '-'}`);
+    for (const t of s.targets) console.log(`  ${t.name.padEnd(26)} ${(t.os || t.platform || 'ios').padEnd(8)} ${t.state.padEnd(9)} ${t.busy ? 'busy' : 'idle'}  slot=${t.boundSlot || '-'}`);
     return 0;
   }
   if (cmd === 'lane') {
@@ -134,8 +153,8 @@ async function main() {
       await openDashboardOnce(o);
       const cur = (await call('GET', '/api/lanes'));
       if (cur.active.length >= cur.max) console.error(`all ${cur.max} lanes busy (${cur.waiting.length} waiting): waiting for a free lane...`);
-      const l = await call('POST', '/api/lanes', { owner: o.owner, target: o.target[0] });
-      console.error(`lane ready after ${fmt(l.waitedMs)}: ${l.name} (${l.udid})`);
+      const l = await call('POST', '/api/lanes', { owner: o.owner, target: o.target[0], platform: o.platform === true ? undefined : o.platform });
+      console.error(`lane ready after ${fmt(l.waitedMs)}: ${l.name} (${l.udid}, ${l.platform})`);
       console.log(l.id);
       return 0;
     }
@@ -143,15 +162,15 @@ async function main() {
     if (sub === 'list') {
       const s = await call('GET', '/api/lanes');
       console.log(`LANES ${s.active.length}/${s.max}`);
-      for (const l of s.active) console.log(`  ${l.id}  owner=${l.owner}  ${l.name}  ${l.busy ? 'busy' : 'idle'}  held ${fmt(Date.now() - l.acquiredAt)}`);
-      for (const w of s.waiting) console.log(`  waiting: ${w.owner}${w.want ? ` (wants ${w.want})` : ''}`);
+      for (const l of s.active) console.log(`  ${l.id}  ${l.platform}  owner=${l.owner}  ${l.name}  ${l.busy ? 'busy' : 'idle'}  held ${fmt(Date.now() - l.acquiredAt)}`);
+      for (const w of s.waiting) console.log(`  waiting: ${w.owner} [${w.platform}]${w.want ? ` (wants ${w.want})` : ''}`);
       return 0;
     }
-    throw new Error('usage: ddagent lane acquire [--owner NAME] [--target "iPhone 16"] | release <id> | list');
+    throw new Error('usage: ddagent lane acquire [--owner NAME] [--platform ios|android] [--target "iPhone 16"|<avd name>] | release <id> | list');
   }
   if (cmd === 'doctor') {
     await ensureDaemon(o);
-    const d = await call('POST', '/api/doctor');
+    const d = await call('POST', '/api/doctor', { platform: o.platform === true ? undefined : o.platform });
     for (const c of d.checks) console.log(`  ${c.ok ? 'ok  ' : 'FAIL'} ${c.name}: ${c.detail}`);
     return d.checks.every((c) => c.ok) ? 0 : 1;
   }
@@ -160,7 +179,7 @@ async function main() {
     console.log(`http://127.0.0.1:${daemonInfo().port}/#token=${token()}`);
     return 0;
   }
-  console.log('usage: ddagent <start [--mock] | init [dir] [--force] | run | prewarm | lane | status | doctor | dashboard>\n  run|prewarm --target "iPhone 16" [--target ...] [--project X.xcodeproj] [--scheme S] [--config Debug] [--rebuild] [--mock]');
+  console.log('usage: ddagent <start [--mock] | init [dir] [--force] | run | prewarm | lane | status | doctor [--platform ios|android] | dashboard>\n  run|prewarm --target "iPhone 16" [--target ...] [--project X.xcodeproj] [--scheme S] [--config Debug] [--rebuild] [--mock]\n  run --lane <android lane> --project <android dir> [--module app] [--task assembleDebug|connectedDebugAndroidTest]');
   return 1;
 }
 

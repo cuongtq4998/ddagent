@@ -8,6 +8,7 @@ const { Store } = require('./lib/store');
 const { Pool } = require('./lib/pool');
 const { Runner } = require('./lib/runner');
 const { Lanes } = require('./lib/lanes');
+const { AndroidRunner } = require('./lib/android-runner');
 const { realBackend, mockBackend } = require('./lib/backend');
 
 const HOME = process.env.DDAGENT_HOME || path.join(os.homedir(), '.ddagent');
@@ -17,6 +18,8 @@ const MAX_LANES = +process.env.DDAGENT_MAX_LANES || 4;
 const LANE_TTL_MIN = +process.env.DDAGENT_LANE_TTL_MIN || 30;
 const MAX_SLOTS = +process.env.DDAGENT_MAX_SLOTS || MAX_LANES; // one DerivedData per lane
 const MIN_FREE_GB = +process.env.DDAGENT_MIN_FREE_GB || 5;
+const ANDROID_BOOT_TIMEOUT_MS = (+process.env.DDAGENT_ANDROID_BOOT_TIMEOUT_S || 300) * 1000;
+const PLATFORMS = ['ios', 'android'];
 
 fs.mkdirSync(HOME, { recursive: true });
 const tokenFile = path.join(HOME, 'token');
@@ -35,26 +38,43 @@ if (!token) {
 const store = new Store(path.join(HOME, 'state.json'));
 const spmDir = path.join(HOME, 'SourcePackages');
 fs.mkdirSync(spmDir, { recursive: true });
-const backend = MOCK ? mockBackend({ speed: +process.env.DDAGENT_MOCK_SPEED || 1 }) : realBackend({ spmDir });
+const backend = MOCK ? mockBackend({ speed: +process.env.DDAGENT_MOCK_SPEED || 1 }) : realBackend({ spmDir, home: HOME, bootTimeoutMs: ANDROID_BOOT_TIMEOUT_MS });
 const pool = new Pool({ root: path.join(HOME, 'pool'), max: MAX_SLOTS, minFreeGB: MIN_FREE_GB, saved: store.state.slots });
 pool.init();
 const runner = new Runner({ pool, backend });
+const androidRunner = new AndroidRunner({ runner, android: backend.android, home: HOME, minFreeGB: MIN_FREE_GB, bootTimeoutMs: ANDROID_BOOT_TIMEOUT_MS });
 const lanes = new Lanes({ max: MAX_LANES, ttlMs: LANE_TTL_MIN * 60000, sims: () => targets, isBusy: (udid) => runner.busy.has(udid) });
+// An emulator ddagent booted dies with its lane. Queued behind any job on the same AVD, so a new owner never loses a fresh boot.
+lanes.on('released', (lane) => {
+  if (lane.platform === 'android') runner.udidLock.with(lane.udid, () => backend.android.shutdown(lane.name)).catch(() => {});
+});
 
 let doctor = { running: true, at: null, checks: [] };
 let targets = [];
 let targetsErr = null;
+const listed = { ios: [], android: [] }; // last good list per platform: one platform failing must not hide the other
 
-async function runDoctor() {
+async function runDoctor(platform) {
+  const sources = { ios: backend, android: backend.android };
+  const wanted = platform ? [platform] : PLATFORMS;
   doctor = { ...doctor, running: true };
-  try { doctor = { running: false, at: Date.now(), checks: await backend.doctor({ minFreeGB: MIN_FREE_GB, root: HOME }) }; } catch (e) {
-    doctor = { running: false, at: Date.now(), checks: [{ name: 'doctor', ok: false, detail: e.message }] };
+  const checks = [];
+  for (const p of wanted) {
+    try { checks.push(...await sources[p].doctor({ minFreeGB: MIN_FREE_GB, root: HOME })); } catch (e) {
+      checks.push({ name: `${p} doctor`, ok: false, detail: e.message });
+    }
   }
+  doctor = { running: false, at: Date.now(), checks };
   broadcast();
 }
 
 async function refreshTargets() {
-  try { targets = await backend.list(); targetsErr = null; } catch (e) { targetsErr = e.message; }
+  const errors = [];
+  for (const [platform, source] of [['ios', backend], ['android', backend.android]]) {
+    try { listed[platform] = await source.list(); } catch (e) { errors.push(`${platform}: ${e.message}`); }
+  }
+  targets = PLATFORMS.flatMap((p) => listed[p]);
+  targetsErr = errors.length ? errors.join('; ') : null;
 }
 
 function snapshot() {
@@ -65,7 +85,7 @@ function snapshot() {
   for (const s of pool.slots.values()) if (s.lastUsed) lastBy.set(s.lastUsed.udid, s.lastUsed);
   const stats = {};
   for (const h of store.state.history) {
-    if (h.status !== 'done' || !h.mode || h.prewarm) continue;
+    if (h.status !== 'done' || !h.mode || h.prewarm || h.platform === 'android') continue;
     const a = stats[h.mode] || (stats[h.mode] = { n: 0, ready: 0, build: 0 });
     a.n++; a.ready += h.readyMs; a.build += h.buildMs;
   }
@@ -79,7 +99,8 @@ function snapshot() {
       stale: !!(boundTo.get(t.udid) || {}).stale, lastRun: lastBy.get(t.udid) || null,
     })),
     jobs: [...runner.jobs.values()].reverse().map((j) => ({
-      id: j.id, scheme: j.req.scheme, status: j.status, mode: j.mode, slotId: j.slotId, key: j.key,
+      id: j.id, platform: j.platform || 'ios', artifacts: j.artifacts || null, tests: j.tests || null,
+      scheme: j.req.scheme, status: j.status, mode: j.mode, slotId: j.slotId, key: j.key,
       prewarm: !!j.req.prewarm, createdAt: j.createdAt, endedAt: j.endedAt, error: j.error,
       phases: j.phases, targets: j.targets, log: j.log.slice(-12),
     })),
@@ -162,7 +183,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/lanes') {
       // Blocks until a lane is free; a client that gives up (closes) leaves the queue.
       const body = await readBody(req);
-      const { promise, cancel } = lanes.acquire({ owner: body.owner, want: body.target });
+      if (body.platform && !PLATFORMS.includes(body.platform)) throw new Error(`platform must be one of: ${PLATFORMS.join(', ')}`);
+      const { promise, cancel } = lanes.acquire({ owner: body.owner, want: body.target, platform: body.platform });
       res.on('close', () => { if (!res.writableEnded) cancel(); });
       const lane = await promise;
       return json(200, lane);
@@ -176,6 +198,7 @@ const server = http.createServer(async (req, res) => {
       if (body.lane) {
         const lane = lanes.get(body.lane);
         if (!lane) throw new Error('no such lane (released or expired); acquire a new one');
+        if (lane.platform !== 'ios') throw new Error(`lane ${lane.id} is an ${lane.platform} lane: use an Android project with --module and --task`);
         lanes.touch(lane.id);
         laneTargets = [lane.udid];
       }
@@ -185,7 +208,21 @@ const server = http.createServer(async (req, res) => {
       });
       return json(202, { id: job.id });
     }
-    if (req.method === 'POST' && url.pathname === '/api/doctor') { await runDoctor(); return json(200, doctor); }
+    if (req.method === 'POST' && url.pathname === '/api/android/run') {
+      const body = await readBody(req);
+      const lane = lanes.get(body.lane);
+      if (!lane) throw new Error('no such lane (released or expired); acquire one with: lane acquire --platform android');
+      if (lane.platform !== 'android') throw new Error(`lane ${lane.id} is an ${lane.platform} lane, not an android lane`);
+      lanes.touch(lane.id);
+      const job = androidRunner.submit({ project: body.project, module: body.module, task: body.task, lane });
+      return json(202, { id: job.id });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/doctor') {
+      const body = await readBody(req);
+      if (body.platform && !PLATFORMS.includes(body.platform)) throw new Error(`platform must be one of: ${PLATFORMS.join(', ')}`);
+      await runDoctor(body.platform);
+      return json(200, doctor);
+    }
     return json(404, { error: 'not found' });
   } catch (e) {
     return json(400, { error: e.message });
@@ -193,9 +230,11 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, '127.0.0.1', async () => {
-  fs.writeFileSync(path.join(HOME, 'daemon.json'), JSON.stringify({ port: PORT, pid: process.pid, mock: backend.mock }));
   console.log(`ddagent ${backend.mock ? '(MOCK) ' : ''}listening on http://127.0.0.1:${PORT}/#token=${token}`);
-  await Promise.all([runDoctor(), refreshTargets()]);
+  // Targets first, so an early lane acquire sees every simulator and AVD instead of an empty list.
+  await refreshTargets();
+  fs.writeFileSync(path.join(HOME, 'daemon.json'), JSON.stringify({ port: PORT, pid: process.pid, mock: backend.mock }));
+  runDoctor();
   broadcast();
   setInterval(async () => { await refreshTargets(); broadcast(); }, 5000).unref();
   setInterval(() => lanes.sweep(), 30000).unref();
@@ -203,6 +242,11 @@ server.listen(PORT, '127.0.0.1', async () => {
   setInterval(() => { for (const s of pool.slots.values()) pool.refreshSize(s).catch(() => {}); }, 60000).unref();
 });
 
-const shutdown = () => { store.flush(); fs.rmSync(path.join(HOME, 'daemon.json'), { force: true }); process.exit(0); };
+const shutdown = async () => {
+  store.flush();
+  fs.rmSync(path.join(HOME, 'daemon.json'), { force: true });
+  try { await backend.android.shutdownAll(); } catch { /* best effort: never block exit */ }
+  process.exit(0);
+};
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

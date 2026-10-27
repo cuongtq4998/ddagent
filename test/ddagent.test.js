@@ -185,6 +185,13 @@ test('lanes: 4 agents run at once, the 5th waits until one releases', async () =
   assert.strictEqual((await fifth.promise).udid, l[1].udid, 'freed simulator is reused, not a new one');
 });
 
+test('lanes: a tvOS simulator is served by an iOS-platform lane (its OS is not the lane platform)', async () => {
+  const sims = [{ udid: 'U-TV', name: 'Apple TV 4K', state: 'Shutdown', kind: 'simulator', os: 'tvos' }];
+  const lane = await new Lanes({ max: 4, sims: () => sims }).acquire({ owner: 'tv', want: 'Apple TV' }).promise;
+  assert.strictEqual(lane.platform, 'ios');
+  assert.strictEqual(lane.udid, 'U-TV');
+});
+
 test('lanes: same owner gets its lane back; after release it prefers its previous simulator', async () => {
   const lanes = new Lanes({ max: 4, sims: () => SIMS });
   const a = await lanes.acquire({ owner: 'x' }).promise;

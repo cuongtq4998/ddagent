@@ -19,7 +19,7 @@ tr:last-child td{border-bottom:0}
 .mut{color:var(--mut)}.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
 .tile{border:1px solid var(--line);border-radius:8px;padding:10px}.tile b{font-size:20px;display:block}
-.badge{font-size:11px;padding:1px 6px;border-radius:4px;color:#fff;margin-left:6px}.cold{background:var(--cold)}.incremental{background:var(--inc)}.cache-hit{background:var(--hit)}
+.badge{font-size:11px;padding:1px 6px;border-radius:4px;color:#fff;margin-left:6px}.cold{background:var(--cold)}.incremental{background:var(--inc)}.cache-hit{background:var(--hit)}.android-build,.android-test{background:var(--busy)}
 .bar{display:flex;height:22px;border-radius:5px;overflow:hidden;background:var(--line);margin:4px 0}
 .seg{display:flex;align-items:center;padding:0 6px;font-size:11px;color:#fff;white-space:nowrap;overflow:hidden;min-width:2px}
 .seg.done{background:var(--ok)}.seg.running{background:var(--busy)}.seg.failed{background:var(--bad)}.seg.skipped{background:var(--mut);opacity:.6}
@@ -35,6 +35,7 @@ pre{margin:6px 0 0;padding:8px;background:var(--bg);border-radius:6px;max-height
   <span id="doctor" style="display:flex;gap:6px;flex-wrap:wrap"></span>
 </header>
 <main>
+  <section class="card"><h2>Lanes (shared limit, iOS and Android)</h2><div id="lanes"></div></section>
   <section class="card"><h2>Speed: first run vs later runs (avg time to app ready)</h2><div id="stats" class="tiles"></div></section>
   <section class="card"><h2>DerivedData slots</h2><div id="slots"></div></section>
   <section class="card"><h2>Simulators / devices</h2><div id="targets"></div></section>
@@ -70,7 +71,7 @@ function bar(phases) {
 }
 
 function render(s) {
-  document.getElementById('mode').textContent = s.mock ? 'MOCK mode (no Xcode)' : '';
+  document.getElementById('mode').textContent = s.mock ? 'MOCK mode (no Xcode, no emulator)' : '';
   put('doctor', h('span', { style: 'display:contents' }, (s.doctor.running ? [h('span', { class: 'chip' }, 'init: checking...')] : s.doctor.checks.map((c) => h('span', { class: 'chip ' + (c.ok ? '' : 'bad'), title: c.detail }, (c.ok ? 'ok ' : 'FAIL ') + c.name)))));
 
   const modes = ['cold', 'incremental', 'cache-hit'];
@@ -87,17 +88,24 @@ function render(s) {
       gb(x.sizeKB),
     ]), 'No slots yet. Run: ddagent run --target "iPhone 16"'));
 
-  put('targets', s.targetsError ? h('div', { class: 'mut' }, 'Cannot list targets: ' + s.targetsError)
-    : table(['Name', 'OS', 'Boot state', 'Activity', 'DerivedData slot', 'Last run'],
-      s.targets.map((t) => [t.name, t.osVersion, t.state, pill(t.busy ? 'building' : 'idle', t.busy ? 'busy' : 'idle'),
+  put('lanes', table(['Lane', 'Platform', 'Owner', 'Device', 'Activity', 'Held'],
+    [...s.lanes.active.map((l) => [l.id, l.platform, l.owner, l.name, pill(l.busy ? 'building' : 'idle', l.busy ? 'busy' : 'idle'), fmt(s.now - l.acquiredAt)]),
+      ...s.lanes.waiting.map((w) => ['waiting', w.platform, w.owner, w.want || 'any', pill('queued'), '-'])],
+    `No lanes held (limit ${s.lanes.max}). Run: ddagent lane acquire --platform android`));
+
+  put('targets', h('div', {}, s.targetsError ? h('div', { class: 'mut' }, 'Cannot list some targets: ' + s.targetsError) : null,
+    table(['Name', 'Platform', 'OS', 'Boot state', 'Activity', 'DerivedData slot', 'Last run'],
+      s.targets.map((t) => [t.name, t.platform || 'ios', t.osVersion || '-', t.state, pill(t.busy ? 'building' : 'idle', t.busy ? 'busy' : 'idle'),
         t.boundSlot ? t.boundSlot + (t.stale ? ' (stale)' : '') : h('span', { class: 'mut' }, '-'),
-        t.lastRun ? h('span', {}, t.lastRun.result, ' ', h('span', { class: 'mut' }, clock(t.lastRun.at))) : h('span', { class: 'mut' }, '-')]), 'No targets'));
+        t.lastRun ? h('span', {}, t.lastRun.result, ' ', h('span', { class: 'mut' }, clock(t.lastRun.at))) : h('span', { class: 'mut' }, '-')]), 'No targets')));
 
   put('jobs', s.jobs.length ? h('div', {}, s.jobs.slice(0, 6).map((j) => h('div', { class: 'job' },
-    h('div', {}, pill(j.status), h('span', { class: 'badge ' + (j.mode || 'queued') }, j.mode || 'queued'), ' ', h('b', {}, j.scheme), ' ', h('span', { class: 'mut' }, `${j.prewarm ? 'prewarm · ' : ''}job ${j.id} · ${j.slotId || 'waiting for slot'} · ${clock(j.createdAt)}`)),
+    h('div', {}, pill(j.status), h('span', { class: 'badge ' + (j.mode || 'queued') }, j.mode || 'queued'), ' ', h('b', {}, j.scheme), ' ', h('span', { class: 'mut' }, `${j.prewarm ? 'prewarm · ' : ''}job ${j.id} · ${j.platform === 'android' ? 'android' : j.slotId || 'waiting for slot'} · ${clock(j.createdAt)}`)),
     j.phases.length ? bar(j.phases) : null,
     j.targets.map((t) => h('div', {}, h('span', { class: 'mut' }, t.name + ' '), t.phases.length ? bar(t.phases) : h('span', { class: 'mut' }, t.status), t.error ? h('div', { style: 'color:var(--bad)' }, t.error) : null, t.readyMs != null ? h('span', { class: 'mut' }, 'ready in ' + fmt(t.readyMs)) : null)),
     j.error ? h('div', { style: 'color:var(--bad)' }, j.error) : null,
+    j.tests ? h('div', { class: 'mut' }, `tests ${j.tests.tests}, failures ${j.tests.failures}, errors ${j.tests.errors}, skipped ${j.tests.skipped}`) : null,
+    j.artifacts ? h('div', { class: 'mut mono' }, 'artifacts: ' + j.artifacts) : null,
     j.status === 'running' && j.log.length ? h('pre', {}, j.log.join('\n')) : null))) : h('div', { class: 'mut' }, 'No jobs yet'));
 
   put('history', table(['Time', 'Scheme', 'Mode', 'Status', 'Build', 'Ready', 'Targets'],
