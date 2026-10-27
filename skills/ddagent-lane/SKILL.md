@@ -1,6 +1,6 @@
 ---
 name: ddagent-lane
-description: Use when an agent needs to run an app on an iOS/iPadOS simulator through ddagent while other agents do the same. Acquire a lane (one dedicated simulator, max 4), run, then release it
+description: Use when an agent needs to run an app on an iOS/iPadOS/tvOS simulator through ddagent while other agents do the same. Acquire a lane (one dedicated simulator, max 4), run, then release it
 ---
 
 # Use a simulator through a ddagent lane
@@ -18,7 +18,7 @@ If `ddagent` is not on `PATH` (for example you run it from a clone), define a sh
 Rules:
 - Always `release` when done. An abandoned lane is released after `DDAGENT_LANE_TTL_MIN` minutes (default 30), and only when no job is running.
 - Use the same `--owner` for the same agent: re-acquiring returns the same lane or simulator, and the next `run` reuses the old DerivedData (incremental / cache-hit).
-- To pick a specific device: `lane acquire --target "iPhone 17"`.
+- To pick a specific device: `lane acquire --target "iPhone 17"`. For a tvOS app use `--target "Apple TV"`: the lane's platform picks the SDK and destination.
 - `lane list` shows held lanes and the queue; `status` shows the DerivedData slots.
 - The dashboard opens by default on the first `run` or `lane acquire`, so the human can watch every agent; later agents do not reopen it. Never pass `--no-open` or set `DDAGENT_NO_OPEN` yourself: only the human may turn it off.
 - Real runs need `DEVELOPER_DIR` pointing at a full Xcode (and `DDAGENT_MOCK` unset). Keep `DDAGENT_MAX_SLOTS` >= the lane count (defaults to `DDAGENT_MAX_LANES`, 4).
