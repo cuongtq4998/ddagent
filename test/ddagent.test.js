@@ -139,6 +139,24 @@ test('runner: two different projects in parallel never share a slot', async () =
   assert.equal(j1.status, 'done'); assert.equal(j2.status, 'done');
 });
 
+test('runner: a tvOS job gets its own cache key (the SDK is part of it)', async () => {
+  const { proj } = makeProject();
+  const { runner } = makeRunner();
+  const tv = await finish(runner, runner.submit({ project: proj, scheme: 'a', targets: ['Apple TV 4K (3rd generation) 2'] }));
+  const ios = await finish(runner, runner.submit({ project: proj, scheme: 'a', targets: ['iPhone 16'] }));
+  assert.equal(tv.status, 'done');
+  assert.equal(ios.status, 'done');
+  assert.notEqual(tv.key, ios.key);
+});
+
+test('runner: one job cannot mix iOS and tvOS targets', async () => {
+  const { proj } = makeProject();
+  const { runner } = makeRunner();
+  const j = await finish(runner, runner.submit({ project: proj, scheme: 'a', targets: ['iPhone 16', 'Apple TV'] }));
+  assert.equal(j.status, 'failed');
+  assert.match(j.error, /several platforms/);
+});
+
 test('runner: rejects unsafe input', () => {
   const { runner } = makeRunner();
   assert.throws(() => runner.submit({ project: 'rel.xcodeproj', scheme: 'a', targets: ['x'] }));
@@ -165,6 +183,13 @@ test('lanes: 4 agents run at once, the 5th waits until one releases', async () =
   assert.strictEqual(await settled(sixth.promise), 'waiting', 'still capped at 4');
   assert.strictEqual(lanes.snapshot().active.length, 4);
   assert.strictEqual((await fifth.promise).udid, l[1].udid, 'freed simulator is reused, not a new one');
+});
+
+test('lanes: a tvOS simulator is served by an iOS-platform lane (its OS is not the lane platform)', async () => {
+  const sims = [{ udid: 'U-TV', name: 'Apple TV 4K', state: 'Shutdown', kind: 'simulator', os: 'tvos' }];
+  const lane = await new Lanes({ max: 4, sims: () => sims }).acquire({ owner: 'tv', want: 'Apple TV' }).promise;
+  assert.strictEqual(lane.platform, 'ios');
+  assert.strictEqual(lane.udid, 'U-TV');
 });
 
 test('lanes: same owner gets its lane back; after release it prefers its previous simulator', async () => {

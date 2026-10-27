@@ -177,6 +177,7 @@ State lives in `~/.ddagent` (override with `DDAGENT_HOME`).
 | `DDAGENT_NO_OPEN` | unset | Do not auto-open the dashboard |
 | `DDAGENT_MOCK` | unset | `1` = fake simulators, AVDs and builds, no Xcode, emulator or JDK needed |
 | `DDAGENT_MOCK_ANDROID_FAIL` | unset | Mock mode only: `boot` or `gradle` makes the fake Android job fail (for testing failure paths) |
+| `DDAGENT_SKIP_PLUGIN_VALIDATION` | unset | `1` = pass `-skipPackagePluginValidation` to `xcodebuild` (needed for packages with build-tool plugins, e.g. Pillarbox) |
 | `DDAGENT_MOCK_SPEED` | 1 | Scale mock delays |
 
 ## For agents
